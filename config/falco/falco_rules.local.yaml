@@ -1,0 +1,100 @@
+# Falco Local Rules Override — Noise Reduction for PoC
+# Disables top 5 most noisy rules in K8s environments
+# These rules generate too many false positives in normal K8s operations.
+# Reference: https://falco.org/docs/rules/overriding/
+#
+# Usage: Mount this file into Falco container at /etc/falco/falco_rules.local.yaml
+#        It overrides rules from the base falco_rules.yaml.
+
+# ─── 1. Read sensitive file untouched ─────────────────────────────────────────
+# NOTE: Kept ENABLED — required for Scenario C (T1552.001 credential file access detection).
+# To reduce noise, we add exceptions for known K8s system containers instead of disabling.
+- rule: Read sensitive file untouched
+  desc: an attempt to read any sensitive file (e.g. files containing user/password/authentication information) by a non-privileged program
+  condition: >
+    sensitive_files and open_read
+    and not user_known_read_sensitive_files_activities
+    and not user_read_sensitive_file_conditions
+    and not (container.image.repository in (
+      registry.k8s.io/kube-proxy,
+      registry.k8s.io/coredns/coredns,
+      registry.k8s.io/etcd,
+      registry.k8s.io/kube-apiserver
+    ))
+  output: "Sensitive file opened for reading by non-privileged program (user=%user.name user_loginuid=%user.loginuid program=%proc.name command=%proc.cmdline file=%fd.name parent=%proc.pname gparent=%proc.aname[2] container_id=%container.id image=%container.image.repository)"
+  priority: WARNING
+  tags: [filesystem, mitre_credential_access, mitre_discovery, T1555, T1083]
+  enabled: true
+
+# ─── 2. Contact K8s API server ────────────────────────────────────────────────
+# Very noisy in K8s: every workload using the default SA token will trigger this.
+# Operators, controllers, sidecars all talk to the K8s API legitimately.
+- rule: Contact K8S API Server From Container
+  desc: Detect attempts to contact the K8s API Server from a container
+  condition: >
+    evt.type=connect
+    and evt.dir=<
+    and (fd.typechar=4 or fd.typechar=6)
+    and container
+    and not k8s_containers
+    and k8s_api_server
+  output: "Unexpected connection to K8s API Server from container (command=%proc.cmdline pid=%proc.pid user=%user.name %container.info image=%container.image.repository:%container.image.tag)"
+  priority: NOTICE
+  tags: [network, k8s, mitre_discovery, T1565]
+  # Override: disabled for PoC noise reduction
+  enabled: false
+
+# ─── 3. Drop and execute new binary in container ──────────────────────────────
+# Triggered by package managers, build tools, and init containers running scripts.
+# Common in CI/CD pipelines and init containers that install dependencies.
+- rule: Drop and execute new binary in container
+  desc: Detect if an executable not belonging to the base image of a container is being executed.
+  condition: >
+    spawned_process
+    and container
+    and proc.is_exe_upper_layer=true
+    and not container.image.repository in (known_drop_and_execute_containers)
+  output: "Executing binary not part of base image (user=%user.name user_loginuid=%user.loginuid user_uid=%user.uid comm=%proc.name exe=%proc.exe container_id=%container.id image=%container.image.repository proc.name=%proc.name proc.args=%proc.args proc.cwd=%proc.cwd proc.pname=%proc.pname proc.pcmdline=%proc.pcmdline proc.sid=%proc.sid proc.exepath=%proc.exepath user.uid=%user.uid user.loginuid=%user.loginuid)"
+  priority: WARNING
+  tags: [process, mitre_persistence, mitre_execution, T1059]
+  # Override: disabled for PoC noise reduction
+  enabled: false
+
+# ─── 4. Write below binary dir ────────────────────────────────────────────────
+# Package installs and container init scripts frequently write to /usr/bin, /usr/sbin.
+# Any container with package installation in its lifecycle will trigger this.
+- rule: Write below binary dir
+  desc: an attempt to write to any file below a set of binary directories
+  condition: >
+    bin_dir and evt.dir = < and open_write
+    and not package_mgmt_procs
+    and not exe_running_docker_save
+    and not python_running_get_pip
+    and not python_running_ms_oms
+    and not user_known_write_below_binary_dir_activities
+    and not linux_kernel_module_load_from_tmp
+  output: "File below a known binary directory opened for writing (user=%user.name user_loginuid=%user.loginuid command=%proc.cmdline pid=%proc.pid file=%fd.name parent=%proc.pname pcmdline=%proc.pcmdline gparent=%proc.aname[2] container_id=%container.id image=%container.image.repository)"
+  priority: ERROR
+  tags: [filesystem, mitre_persistence, T1543]
+  # Override: disabled for PoC noise reduction
+  enabled: false
+
+# ─── 5. System procs network activity ─────────────────────────────────────────
+# System daemons like systemd-resolved, systemd-networkd, and sshd all make
+# network connections as part of normal operation. Very noisy in any K8s node.
+- rule: System procs network activity
+  desc: any network activity performed by system binaries that are not expected to send or receive any network traffic
+  condition: >
+    (fd.sockfamily = ip or fd.sockfamily = ip6)
+    and (network_tool_procs or
+        (proc.name = "sshd" and evt.dir = < and
+         (evt.type = connect or evt.type = accept)))
+    and evt.dir = <
+    and (evt.type = connect or evt.type = accept)
+    and container
+    and not user_known_system_procs_network_activity_conditions
+  output: "Known system binary sent/received network traffic (user=%user.name user_loginuid=%user.loginuid command=%proc.cmdline connection=%fd.name container_id=%container.id image=%container.image.repository)"
+  priority: NOTICE
+  tags: [network, mitre_exfiltration]
+  # Override: disabled for PoC noise reduction
+  enabled: false

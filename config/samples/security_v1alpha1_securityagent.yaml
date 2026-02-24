@@ -1,0 +1,111 @@
+apiVersion: security.ctem.io/v1alpha1
+kind: SecurityAgent
+metadata:
+  name: ctem-security-agent
+  namespace: security-system
+  labels:
+    app.kubernetes.io/name: security-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  global:
+    namespace: security-system
+    imagePullSecrets: []
+
+  features:
+    - name: otel_pipeline
+      enabled: true
+      config:
+        gateway:
+          replicas: 1
+          image: "otel/opentelemetry-collector-contrib:0.96.0"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+        nodeCollector:
+          image: "otel/opentelemetry-collector-contrib:0.96.0"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+
+    - name: falco
+      enabled: true
+      config:
+        driver: "modern_ebpf"
+        image: "falcosecurity/falco-no-driver:0.37.1"
+        jsonOutput: true
+        fileOutput:
+          enabled: true
+          keep_alive: true
+          filename: "/var/log/security/falco/events.log"
+
+    - name: tetragon
+      enabled: true
+      config:
+        image: "quay.io/cilium/tetragon:v1.1.0"
+        exportFilename: "/var/run/cilium/tetragon/tetragon.log"
+        enableTracingPolicy: true
+
+    - name: osquery
+      enabled: false
+      config:
+        schedulerInterval: 3600
+        resultLogFile: "/var/log/security/osquery/results.log"
+
+    - name: trivy
+      enabled: true
+      config:
+        schedule: "0 2 * * *"
+
+  output:
+    elasticsearch:
+      url: "https://ctem-es-es-http.security-system.svc:9200"
+      tls:
+        insecureSkipVerify: true
+      auth:
+        secretRef:
+          name: ctem-es-es-elastic-user
+      indices:
+        events: "security-events"
+        inventory: "security-inventory"
+        vulnerability: "security-vuln"
+
+  override:
+    nodeAgent:
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
+      nodeSelector: {}
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "256Mi"
+    perTool:
+      falco:
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+      tetragon:
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"

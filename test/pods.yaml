@@ -1,0 +1,150 @@
+---
+# Namespace for all CTEM test resources
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-system
+  labels:
+    app.kubernetes.io/name: security-operator
+    ctem/test: "true"
+
+---
+# ctem-testbox: General-purpose attack simulation pod
+# Used for scenarios: B (T1059.004), C-1 (credential file read), D-1/D-2 (mount escape), E (cron scheduling)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ctem-testbox
+  namespace: security-system
+  labels:
+    app: ctem-testbox
+    ctem/role: testbox
+spec:
+  containers:
+    - name: testbox
+      image: alpine:3.19
+      command: ["sh", "-c", "while true; do sleep 3600; done"]
+      securityContext:
+        privileged: true
+        capabilities:
+          add:
+            - SYS_PTRACE
+            - SYS_ADMIN
+      volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-dev
+          mountPath: /host/dev
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+  volumes:
+    - name: host-proc
+      hostPath:
+        path: /proc
+    - name: host-dev
+      hostPath:
+        path: /dev
+    - name: host-sys
+      hostPath:
+        path: /sys
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 5
+
+---
+# attacker: Network-capable attacker simulation pod
+# Used for scenarios: C-2 (K8s API token access), D-3 (nsenter container escape), network scanning
+apiVersion: v1
+kind: Pod
+metadata:
+  name: attacker
+  namespace: security-system
+  labels:
+    app: attacker
+    ctem/role: attacker
+spec:
+  serviceAccountName: attacker-sa
+  containers:
+    - name: attacker
+      image: nicolaka/netshoot:v0.13
+      command: ["sh", "-c", "while true; do sleep 3600; done"]
+      securityContext:
+        privileged: true
+        capabilities:
+          add:
+            - SYS_PTRACE
+            - SYS_ADMIN
+            - NET_ADMIN
+            - NET_RAW
+      env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+      volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+        - name: host-root
+          mountPath: /host/root
+          readOnly: true
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+  volumes:
+    - name: host-proc
+      hostPath:
+        path: /proc
+    - name: host-root
+      hostPath:
+        path: /
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 5
+
+---
+# attacker ServiceAccount (for K8s API token scenario)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: attacker-sa
+  namespace: security-system
+
+---
+# target-nginx: CVE scan target
+# Intentionally uses older nginx image with known CVEs — Trivy scan target only
+apiVersion: v1
+kind: Pod
+metadata:
+  name: target-nginx
+  namespace: security-system
+  labels:
+    app: target-nginx
+    ctem/role: target
+spec:
+  containers:
+    - name: nginx
+      # nginx:1.25 intentionally pinned — contains known CVEs for Trivy discovery testing
+      image: nginx:1.25
+      ports:
+        - containerPort: 80
+          name: http
+      resources:
+        requests:
+          cpu: "50m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 5

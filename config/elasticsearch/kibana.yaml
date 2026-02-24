@@ -1,0 +1,27 @@
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: ctem-kibana
+  namespace: security-system
+spec:
+  version: 8.12.0
+  count: 1
+  elasticsearchRef:
+    name: ctem-es
+  podTemplate:
+    spec:
+      containers:
+        - name: kibana
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          env:
+            - name: KIBANA_SYSTEM_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ctem-es-es-elastic-user
+                  key: elastic

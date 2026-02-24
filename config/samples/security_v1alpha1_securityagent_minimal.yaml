@@ -1,0 +1,28 @@
+apiVersion: security.ctem.io/v1alpha1
+kind: SecurityAgent
+metadata:
+  name: ctem-security-agent-minimal
+  namespace: security-system
+  labels:
+    app.kubernetes.io/name: security-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  features:
+    - name: otel_pipeline
+      enabled: true
+
+    - name: falco
+      enabled: true
+      config:
+        driver: "modern_ebpf"
+
+  output:
+    elasticsearch:
+      url: "https://ctem-es-es-http.security-system.svc:9200"
+      tls:
+        insecureSkipVerify: true
+      auth:
+        secretRef:
+          name: es-credentials
+      indices:
+        events: "security-events"
