@@ -194,20 +194,25 @@ json_output: true
 json_include_output_property: true
 json_include_tags_property: true
 
+# Rules files — must include default rules from the container image
+rules_file:
+  - /etc/falco/falco_rules.yaml
+  - /etc/falco/falco_rules.local.yaml
+
 # File output for OTel collection
 file_output:
   enabled: true
   keep_alive: true
   filename: /var/log/security/falco/events.log
 
-# Disable stdout output to avoid duplicate collection
+# Stdout output for debugging and pod log visibility
 stdout_output:
-  enabled: false
+  enabled: true
 
-# Log rotation settings
-log_output:
-  max_size: 100
-  max_files: 3
+# Logging to stderr so kubectl logs can see Falco operational messages
+log_stderr: true
+log_syslog: false
+log_level: info
 
 # Engine configuration
 engine:
@@ -291,7 +296,6 @@ func (f *falcoFeature) buildDaemonSet(image string) *appsv1.DaemonSet {
 								"--modern-bpf",
 								"-o", "engine.kind=modern_ebpf",
 								"-c", "/etc/falco/falco.yaml",
-								"-r", "/etc/falco/falco_rules.local.yaml",
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
