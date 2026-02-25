@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package osquery implements the OSquery feature (Priority 100).
-// It deploys OSquery as a non-privileged DaemonSet for SQL-based inventory collection,
+// It deploys OSquery as a DaemonSet with host PID/network access for SQL-based inventory collection,
 // writing results to a file for OTel collection.
 package osquery
 
@@ -39,12 +39,12 @@ func init() {
 }
 
 const (
-	osqueryImage   = "osquery/osquery:5.12.1"
+	osqueryImage   = "osquery/osquery:5.17.0-debian12"
 	osqueryDSName  = "osquery"
 	osqueryCMName  = "osquery-config"
 	osquerySAName  = "osquery"
 	osqueryLogPath = "/var/log/security/osquery"
-	osqueryLogFile = "/var/log/security/osquery/results.log"
+	osqueryLogFile = "/var/log/security/osquery/osqueryd.results.log"
 )
 
 // osqueryConfig holds optional config parsed from the FeatureSpec.Config.
@@ -89,7 +89,7 @@ func (f *osqueryFeature) Contribute(ctx context.Context, store *feature.DesiredS
 func (f *osqueryFeature) OTelConfig() *feature.OTelReceiverConfig {
 	return &feature.OTelReceiverConfig{
 		ReceiverName: "filelog/osquery",
-		LogPath:      osqueryLogFile,
+		LogPath:      osqueryLogFile + "*",
 		ParseFormat:  "json",
 		Attributes: map[string]string{
 			"security_tool": "osquery",
@@ -139,7 +139,8 @@ func (f *osqueryFeature) buildServiceAccount() *corev1.ServiceAccount {
 func (f *osqueryFeature) buildConfigMap() *corev1.ConfigMap {
 	scheduleInterval := f.cfg.ScheduleInterval
 
-	osqueryFlagsFile := `--logger_plugin=filesystem
+	osqueryFlagsFile := `--config_plugin=filesystem
+--logger_plugin=filesystem
 --logger_path=/var/log/security/osquery
 --log_result_events=true
 --schedule_splay_percent=10
@@ -147,7 +148,7 @@ func (f *osqueryFeature) buildConfigMap() *corev1.ConfigMap {
 `
 
 	osqueryPackJSON := fmt.Sprintf(`{
-  "queries": {
+  "schedule": {
     "running_processes": {
       "query": "SELECT pid, name, path, cmdline, uid FROM processes;",
       "interval": %d,
@@ -225,6 +226,8 @@ func (f *osqueryFeature) buildDaemonSet(image string) *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: osquerySAName,
+					HostPID:            true,
+					HostNetwork:        true,
 					Tolerations: []corev1.Toleration{
 						{
 							Key:      "node-role.kubernetes.io/master",
@@ -246,7 +249,7 @@ func (f *osqueryFeature) buildDaemonSet(image string) *appsv1.DaemonSet {
 								"--flagfile=/etc/osquery/osquery.flags",
 								"--config_path=/etc/osquery/security.conf",
 							},
-							// Not privileged — OSquery only needs read access to /proc and /etc
+							// Not privileged — hostPID/hostNetwork provide sufficient host visibility
 							SecurityContext: &corev1.SecurityContext{
 								RunAsUser: &runAsUser,
 							},
@@ -269,6 +272,10 @@ func (f *osqueryFeature) buildDaemonSet(image string) *appsv1.DaemonSet {
 								{
 									Name:      "osquery-log",
 									MountPath: osqueryLogPath,
+								},
+								{
+									Name:      "osquery-db",
+									MountPath: "/var/osquery",
 								},
 							},
 						},
@@ -309,6 +316,12 @@ func (f *osqueryFeature) buildDaemonSet(image string) *appsv1.DaemonSet {
 									Path: osqueryLogPath,
 									Type: &hostPathDirectoryOrCreate,
 								},
+							},
+						},
+						{
+							Name: "osquery-db",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
 					},

@@ -54,10 +54,10 @@ spec:
         enableTracingPolicy: true
 
     - name: osquery
-      enabled: false
+      enabled: true
       config:
-        schedulerInterval: 3600
-        resultLogFile: "/var/log/security/osquery/results.log"
+        scheduleInterval: 60
+        image: "osquery/osquery:5.17.0-debian12"
 
     - name: trivy
       enabled: true
