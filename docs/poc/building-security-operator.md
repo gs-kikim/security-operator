@@ -130,7 +130,7 @@ flowchart LR
     subgraph "각 노드"
         Falco["Falco<br/>/var/log/security/falco/events.log"]
         Tetragon["Tetragon<br/>/var/log/security/tetragon/events.log"]
-        OSquery["OSquery<br/>/var/log/security/osquery/results.log"]
+        OSquery["OSquery<br/>/var/log/security/osquery/osqueryd.results.log"]
         OTelNode["OTel Node Collector<br/>(filelog receivers)"]
     end
 
@@ -738,7 +738,7 @@ sequenceDiagram
     Tetragon-->>R: {filelog/tetragon, /var/log/security/tetragon/events.log*, json, security_tool=tetragon, events}
 
     R->>OSquery: OTelConfig()
-    OSquery-->>R: {filelog/osquery, /var/log/security/osquery/results.log, json, security_tool=osquery, inventory}
+    OSquery-->>R: {filelog/osquery, /var/log/security/osquery/osqueryd.results.log*, json, security_tool=osquery, inventory}
 
     R->>Trivy: OTelConfig()
     Trivy-->>R: nil (OTel 불필요)
@@ -1394,25 +1394,21 @@ Status 업데이트 → Watch 트리거 → Reconcile → Status 업데이트 �
 
 ### 아키텍처 핵심 요약
 
-```
-┌─────────────────────────────────────────────────────────┐
-│ SecurityAgent CRD                                        │
-│  - features: [{name, enabled, config}, ...]             │
-│  - output: {elasticsearch: {url, indices, auth}}        │
-│  - override: {nodeAgent: {...}, perTool: {...}}          │
-└──────────────────────┬──────────────────────────────────┘
-                       │ watch
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│ Reconciler (7-Step Loop)                                 │
-│  1. BuildActiveFeatures   → enabled, priority sorted     │
-│  2. Contribute            → Store에 리소스 축적           │
-│  3. OTel Synthesis        → ConfigMap 자동 생성           │
-│  4. Override              → 2단계 머지                    │
-│  5. SSA Apply             → FieldOwner 기반 적용          │
-│  6. GC                    → 불필요 리소스 삭제             │
-│  7. Status                → Assess + ObservedGeneration   │
-└─────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    CRD["<b>SecurityAgent CRD</b><br/>- features: [{name, enabled, config}, ...]<br/>- output: {elasticsearch: {url, indices, auth}}<br/>- override: {nodeAgent: {...}, perTool: {...}}"]
+    CRD -->|watch| Step1
+
+    subgraph Reconciler["Reconciler (7-Step Loop)"]
+        Step1["1. BuildActiveFeatures → enabled, priority sorted"]
+        Step2["2. Contribute → Store에 리소스 축적"]
+        Step3["3. OTel Synthesis → ConfigMap 자동 생성"]
+        Step4["4. Override → 2단계 머지"]
+        Step5["5. SSA Apply → FieldOwner 기반 적용"]
+        Step6["6. GC → 불필요 리소스 삭제"]
+        Step7["7. Status → Assess + ObservedGeneration"]
+        Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Step6 --> Step7
+    end
 ```
 
 ### 핵심 설계 결정 요약

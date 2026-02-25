@@ -271,7 +271,7 @@ Reconciler는 Feature들을 오케스트레이션하는 엔진입니다. CRD가 
 ```mermaid
 flowchart TD
     Start["CRD 변경 감지"] --> Check{"Spec이 바뀌었나?<br/>(Generation 비교)"}
-    Check -- "안 바뀜" --> StatusOnly["상태만 점검<br/>60초 후 재확인"]
+    Check -- "안 바뀜" --> StatusOnly["상태만 점검<br/>30초 후 재확인"]
     Check -- "바뀜" --> Step1
 
     Step1["Step 1: Feature 빌드<br/>CRD의 features[] 배열에서<br/>enabled: true인 것만 골라<br/>우선순위 순으로 정렬"]
@@ -331,10 +331,10 @@ flowchart TB
     subgraph node["Worker Node (각 노드마다)"]
         direction TB
         F["Falco<br/>→ /var/log/security/falco/events.log"]
-        T["Tetragon<br/>→ stdout → /var/log/pods/.../*.log"]
-        O["OSquery<br/>→ /var/log/security/osquery/results.log"]
+        T["Tetragon<br/>→ /var/log/security/tetragon/events.log"]
+        O["OSquery<br/>→ /var/log/security/osquery/osqueryd.results.log"]
 
-        OTN["OTel Node Collector (DaemonSet)<br/>filelog receiver 3개로 로그 수집<br/>+ k8sattributes로 Pod 메타 부착<br/>+ transform으로 필드 리매핑"]
+        OTN["OTel Node Collector (DaemonSet)<br/>filelog receiver 3개로 로그 수집<br/>+ resource 프로세서로 노드 속성 부착<br/>+ batch 프로세서"]
 
         F --> OTN
         T --> OTN
@@ -343,7 +343,7 @@ flowchart TB
 
     subgraph cluster["클러스터 (1개)"]
         direction TB
-        OTG["OTel Gateway (Deployment)<br/>severity 통합 매핑 (1~5)<br/>routing: tool별 ES 인덱스 분기"]
+        OTG["OTel Gateway (Deployment)<br/>routing connector: security_tool 속성 기반<br/>ES 인덱스 분기 (events/inventory)"]
 
         ES["Elasticsearch<br/>security-inventory | security-events | security-vuln"]
 
@@ -353,7 +353,7 @@ flowchart TB
     subgraph trivy_path["Trivy 별도 경로"]
         direction LR
         TR["Trivy Operator"] --> VR["VulnerabilityReport CRD"]
-        VR --> CJ["CronJob (5분마다)<br/>kubectl get → jq → curl bulk"]
+        VR --> CJ["CronJob (6시간마다)<br/>kubectl get → jq → curl bulk"]
     end
 
     OTN -- "OTLP/gRPC" --> OTG
@@ -370,13 +370,13 @@ flowchart TB
 
 여기서 DevOps 경험이 있는 분이라면 "왜 도구마다 로그 경로가 다르지?"라고 의문이 들 텐데, 각 도구의 출력 특성 때문입니다.
 
-**Falco**는 `file_output`으로 직접 파일에 씁니다. Falco JSON에는 이미 `k8s.ns.name`, `k8s.pod.name` 같은 쿠버네티스 메타데이터가 포함되어 있기 때문에, OTel의 `transform` 프로세서로 이 필드들을 표준 필드로 리매핑합니다.
+**Falco**는 `file_output`으로 직접 파일에 씁니다. Falco JSON에는 이미 `k8s.ns.name`, `k8s.pod.name` 같은 쿠버네티스 메타데이터가 포함되어 있습니다. OTel Node Collector의 `filelog/falco` 리시버가 JSON을 파싱하고, `resource` 프로세서가 `security_tool=falco` 속성을 부착합니다.
 
-**Tetragon**은 stdout으로 출력합니다. kubelet이 자동으로 `/var/log/pods/` 하위에 컨테이너 로그를 만들어주므로, OTel의 `k8sattributes` 프로세서가 Pod 로그 경로에서 자동으로 Pod 메타데이터를 붙여줍니다. kubectl logs로 로그를 볼 수 있어서 디버깅도 편합니다.
+**Tetragon**은 `--export-filename` 옵션으로 JSON 이벤트를 `/var/log/security/tetragon/events.log` 파일에 씁니다. OTel Node Collector의 `filelog/tetragon` 리시버가 이 파일을 감시하여 수집합니다. `--export-file-max-size-mb`와 `--export-file-rotation-interval` 옵션으로 로테이션도 자동 관리됩니다.
 
-**OSquery**는 파일 출력인데, 수집하는 게 노드 인벤토리(호스트 정보)라서 Pod 메타데이터가 필요 없습니다. `hostIdentifier` 필드에 노드 이름이 들어있어서, 이걸 `k8s.node.name`으로 매핑합니다.
+**OSquery**는 파일 출력(`/var/log/security/osquery/osqueryd.results.log`)인데, 수집하는 게 노드 인벤토리(호스트 정보)라서 Pod 메타데이터가 필요 없습니다. `hostIdentifier` 필드에 노드 이름이 들어있어서, OTel의 `resource` 프로세서가 `k8s.node.name` 속성을 부착합니다.
 
-**Trivy**는 아예 OTel을 안 씁니다. Trivy Operator가 VulnerabilityReport CRD를 만들면, CronJob이 5분마다 `kubectl get vulnerabilityreports`로 결과를 가져와서 jq로 가공한 후 ES에 직접 Bulk Insert합니다. `_id`를 `<UID>:<CVE>:<패키지>`로 고정해서 중복을 방지합니다.
+**Trivy**는 아예 OTel을 안 씁니다. Trivy Operator가 VulnerabilityReport CRD를 만들면, CronJob이 6시간마다(기본값 `0 */6 * * *`) `kubectl get vulnerabilityreports`로 결과를 가져와서 jq로 가공한 후 ES에 직접 Bulk Insert합니다. `_id`를 `<UID>:<CVE>:<패키지>`로 고정해서 중복을 방지합니다.
 
 ### OTel Node vs Gateway — 2계층 구조
 
@@ -384,7 +384,7 @@ OTel Collector를 왜 Node(DaemonSet)와 Gateway(Deployment) 2계층으로 나�
 
 **Node Collector**는 각 워커 노드에서 로그를 수집하고 1차 가공(파싱, 메타데이터 부착)을 합니다. 로그 파일은 로컬에 있으니까 DaemonSet이어야 합니다.
 
-**Gateway**는 모든 노드에서 온 로그를 받아서 2차 가공(severity 통합 매핑, 인덱스 라우팅)을 하고 ES에 보냅니다. 이건 클러스터에 1개만 있으면 되니까 Deployment입니다.
+**Gateway**는 모든 노드에서 온 로그를 받아서 `routing` connector로 `security_tool` 속성 기반 인덱스 라우팅을 하고 ES에 보냅니다. osquery 이벤트는 `security-inventory`로, 나머지(falco, tetragon)는 `security-events`로 분기됩니다. 이건 클러스터에 1개만 있으면 되니까 Deployment입니다.
 
 이 2계층 구조의 장점은, ES 연결 설정(인증, TLS)을 Gateway 한 곳에서만 관리한다는 것입니다. Node Collector는 Gateway의 OTLP 엔드포인트만 알면 됩니다.
 
@@ -471,10 +471,11 @@ spec:
         - operator: Exists     # 모든 taint를 tolerate
 
     # 2단계: 도구별 — 해당 도구에만 적용 (공통보다 우선)
-    falco:
-      resources:
-        limits:
-          memory: "2Gi"        # Falco만 메모리 2Gi로
+    perTool:
+      falco:
+        resources:
+          limits:
+            memory: "2Gi"      # Falco만 메모리 2Gi로
 ```
 
 Helm에서 `values.yaml`의 global과 per-component 설정이 있는 것과 같은 패턴입니다. Operator는 이 Override를 DesiredStateStore의 리소스에 자동으로 병합합니다.
@@ -538,7 +539,7 @@ Falco의 `output_fields`와 OSquery의 `columns`에 **`flattened` 타입**을 �
 
 **3. Reconcile 무한 루프 (R5)** — 위에서 설명한 대로 `GenerationChangedPredicate` + `ObservedGeneration` 패턴으로 방지합니다.
 
-**4. k8sattributes가 Falco 로그에 Pod 메타를 못 붙임 (R2)** — Falco는 파일로 로그를 쓰기 때문에 k8sattributes 프로세서가 "이 로그가 어떤 Pod에서 왔는지" 알 수 없습니다. 그래서 Falco는 자체 JSON에 포함된 k8s 메타를 transform으로 리매핑하고, Tetragon은 stdout + k8sattributes 자동 매핑을 씁니다. 이게 "하이브리드 방식"입니다.
+**4. 도구별 메타데이터 부착 방식 차이 (R2)** — Falco는 자체 JSON에 이미 `k8s.ns.name`, `k8s.pod.name` 등 쿠버네티스 메타데이터가 포함되어 있습니다. Tetragon은 `--export-filename`으로 파일에 쓰고 `process.pod` 등의 필드로 메타를 제공합니다. 각 도구의 filelog 리시버에서 `security_tool` 속성을 부착하고, OTel Gateway의 routing connector가 이 속성을 기준으로 ES 인덱스를 분기합니다.
 
 **5. 시나리오 Pod에 바이너리 없어서 탐지 실패 (R9)** — 위에서 설명한 Pod 역할 분리로 해결합니다.
 

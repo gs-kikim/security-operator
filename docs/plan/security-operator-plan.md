@@ -721,101 +721,91 @@ func (r *SecurityAgentReconciler) handleDeletion(ctx context.Context,
 
 ## 5.1 전체 흐름
 
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                   SecurityAgent CRD (단일 진입점)                   │
-│   features: [otel_pipeline, falco, tetragon, osquery, trivy]       │
-└──────────────────────────────┬─────────────────────────────────────┘
-                               │ Reconcile
-                               ▼
-┌────────────────────────────────────────────────────────────────────┐
-│                Security Operator Controller                        │
-│   BuildActiveFeatures(priority순) → Contribute → Override → Apply  │
-│   Assess() → Status 갱신                                           │
-└──────────────────────────────┬─────────────────────────────────────┘
-                               │
-         ┌─────────────────────┼────────────────────────┐
-         ▼                     ▼                        ▼
-  ┌──────────────┐  ┌────────────────────┐  ┌────────────────────┐
-  │  DaemonSets  │  │   Deployments      │  │  CRD / RBAC / CM   │
-  │  falco       │  │   trivy-operator   │  │  TracingPolicy     │
-  │  tetragon    │  │   otel-gateway     │  │  ServiceAccounts   │
-  │  osquery     │  └────────────────────┘  │  CronJob           │
-  │  otel-node   │                          └────────────────────┘
-  └──────┬───────┘
-         │
-═════════╪══════════════════════ Worker Node ════════════════════════
-         │
-  ┌──────┴──────────────────────────────────────────────────────────┐
-  │  ┌────────┐  ┌──────────┐  ┌─────────┐                         │
-  │  │ Falco  │  │ Tetragon │  │ OSquery │                         │
-  │  │  eBPF  │  │  eBPF    │  │  SQL    │                         │
-  │  │syscall │  │  kprobe  │  │  poll   │                         │
-  │  └───┬────┘  └────┬─────┘  └────┬────┘                         │
-  │      │ JSON file   │ stdout      │ JSON file                    │
-  │      ▼             ▼             ▼                              │
-  │  /var/log/      /var/log/     /var/log/                         │
-  │  security/      pods/...      security/                         │
-  │  falco/         tetragon/     osquery/                          │
-  │  events.log     *.log         results.log                       │
-  │      │             │             │                              │
-  │      ▼             ▼             ▼                              │
-  │  ┌──────────────────────────────────────────────────────────┐   │
-  │  │       OTel Node Collector DaemonSet                      │   │
-  │  │                                                          │   │
-  │  │  filelog/falco    ──┐                                    │   │
-  │  │  filelog/tetragon ──┼→ k8sattributes → transform(meta)  │   │
-  │  │  filelog/osquery  ──┘   → batch → otlp exporter          │   │
-  │  └──────────────────────────────┬───────────────────────────┘   │
-  └─────────────────────────────────┼───────────────────────────────┘
-                                    │ OTLP/gRPC
-                                    ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │          OTel Gateway Deployment                                 │
-  │                                                                 │
-  │  otlp receiver                                                  │
-  │      │                                                          │
-  │  transform/severity (통합 정수 1~5 매핑)                          │
-  │      │                                                          │
-  │  routing processor                                              │
-  │    → tool=osquery  → security-inventory     (CTEM Scope)        │
-  │    → tool=falco    → security-events        (CTEM Validation)   │
-  │    → tool=tetragon → security-events        (CTEM Validation)   │
-  │      │                                                          │
-  │  elasticsearch exporter(s)                                      │
-  └──────────────────────┬──────────────────────────────────────────┘
-                         │ Bulk API
-                         ▼
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                 Elasticsearch + Kibana                           │
-  │                                                                 │
-  │  security-inventory   OSquery 인벤토리          ← CTEM Scope    │
-  │  security-events      Falco/Tetragon 경보       ← CTEM Valid.   │
-  │  security-vuln        Trivy CVE                 ← CTEM Disc.    │
-  │                                                                 │
-  │  Data View: security-*  (통합 조회)                              │
-  └─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    CRD["SecurityAgent CRD (단일 진입점)<br/>features: otel_pipeline, falco, tetragon, osquery, trivy"]
+    CRD -->|Reconcile| Controller
 
-  ※ Trivy 별도 경로:
-  Trivy Operator → VulnerabilityReport CRD → CronJob (5분, _id 고정 upsert) → security-vuln
+    Controller["Security Operator Controller<br/>BuildActiveFeatures(priority순) → Contribute → Override → Apply<br/>Assess() → Status 갱신"]
+    Controller --> DS
+    Controller --> Deploy
+    Controller --> Resources
+
+    DS["DaemonSets<br/>falco / tetragon / osquery / otel-node"]
+    Deploy["Deployments<br/>trivy-operator / otel-gateway"]
+    Resources["CRD / RBAC / CM<br/>TracingPolicy / ServiceAccounts / CronJob"]
+
+    subgraph WorkerNode["Worker Node"]
+        Falco["Falco<br/>eBPF syscall"]
+        Tetragon["Tetragon<br/>eBPF kprobe"]
+        OSquery["OSquery<br/>SQL poll"]
+
+        FalcoLog["/var/log/security/falco/events.log"]
+        TetragonLog["/var/log/pods/.../tetragon/*.log"]
+        OSqueryLog["/var/log/security/osquery/results.log"]
+
+        Falco -->|JSON file| FalcoLog
+        Tetragon -->|stdout| TetragonLog
+        OSquery -->|JSON file| OSqueryLog
+
+        subgraph OTelNode["OTel Node Collector DaemonSet"]
+            FilelogFalco["filelog/falco"]
+            FilelogTetragon["filelog/tetragon"]
+            FilelogOSquery["filelog/osquery"]
+            Pipeline["k8sattributes → transform(meta) → batch → otlp exporter"]
+            FilelogFalco --> Pipeline
+            FilelogTetragon --> Pipeline
+            FilelogOSquery --> Pipeline
+        end
+
+        FalcoLog --> FilelogFalco
+        TetragonLog --> FilelogTetragon
+        OSqueryLog --> FilelogOSquery
+    end
+
+    DS --> Falco
+    DS --> Tetragon
+    DS --> OSquery
+
+    Pipeline -->|OTLP/gRPC| Gateway
+
+    subgraph Gateway["OTel Gateway Deployment"]
+        OTLPRecv["otlp receiver"]
+        Severity["transform/severity (통합 정수 1~5 매핑)"]
+        Routing["routing processor"]
+        RouteInventory["tool=osquery → security-inventory (CTEM Scope)"]
+        RouteEvents1["tool=falco → security-events (CTEM Validation)"]
+        RouteEvents2["tool=tetragon → security-events (CTEM Validation)"]
+        ESExporter["elasticsearch exporter(s)"]
+
+        OTLPRecv --> Severity --> Routing
+        Routing --> RouteInventory --> ESExporter
+        Routing --> RouteEvents1 --> ESExporter
+        Routing --> RouteEvents2 --> ESExporter
+    end
+
+    ESExporter -->|Bulk API| ES
+
+    subgraph ES["Elasticsearch + Kibana"]
+        Inventory["security-inventory — OSquery 인벤토리 ← CTEM Scope"]
+        Events["security-events — Falco/Tetragon 경보 ← CTEM Validation"]
+        Vuln["security-vuln — Trivy CVE ← CTEM Discovery"]
+        DataView["Data View: security-* (통합 조회)"]
+    end
+
+    TrivyPath["※ Trivy 별도 경로:<br/>Trivy Operator → VulnerabilityReport CRD<br/>→ CronJob (5분, _id 고정 upsert)"]
+    TrivyPath --> Vuln
 ```
 
 ## 5.2 k8s 메타데이터 부착 — 도구별 하이브리드 방식
 
 도구마다 출력 특성이 다르므로 **도구별 최적 경로를 선택**한다.
 
-```
-도구        출력 방식         k8s 메타 소스              이유
-────────────────────────────────────────────────────────────────────────
-Falco       파일 출력         도구 자체 JSON 필드         Falco JSON에 k8s.ns.name,
-            (file_output)     → OTel transform 리매핑     k8s.pod.name이 이미 포함.
-
-Tetragon    stdout            /var/log/pods/ 경로         k8sattributes가 자동으로
-                              → k8sattributes 자동        Pod 메타를 붙임.
-
-OSquery     파일 출력         hostIdentifier 필드         노드 인벤토리 = Node 메타 중심.
-            (results.log)     + k8sattributes node        Pod 메타 불필요.
-```
+| 도구 | 출력 방식 | k8s 메타 소스 | 이유 |
+|------|-----------|--------------|------|
+| Falco | 파일 출력 (file_output) | 도구 자체 JSON 필드 → OTel transform 리매핑 | Falco JSON에 k8s.ns.name, k8s.pod.name이 이미 포함 |
+| Tetragon | stdout | /var/log/pods/ 경로 → k8sattributes 자동 | k8sattributes가 자동으로 Pod 메타를 붙임 |
+| OSquery | 파일 출력 (results.log) | hostIdentifier 필드 + k8sattributes node | 노드 인벤토리 = Node 메타 중심. Pod 메타 불필요 |
 
 ## 5.3 OTel Node Collector 설정 (자동 합성)
 
@@ -1129,43 +1119,28 @@ curl -XPUT "https://es:9200/_index_template/security-vuln" \
 
 ## 7.1 5단계별 커버리지
 
-```
- CTEM 단계        도구              PoC 검증 항목                  ES 인덱스
-────────────────────────────────────────────────────────────────────────────
+```mermaid
+graph TD
+    Scope["<b>Scope (영역)</b><br/><br/>OSquery:<br/>✓ 노드 OS/커널 버전 인벤토리 → inventory<br/>✓ listening_ports 열린 포트 → inventory<br/>✓ docker_containers 컨테이너 → inventory<br/>✓ kernel_modules eBPF 확인 → inventory<br/><br/>Trivy:<br/>✓ 컨테이너 이미지 목록 → vuln"]
 
- ┌─────────┐
- │  Scope  │     OSquery          ✓ 노드 OS/커널 버전 인벤토리    inventory
- │  (영역)  │                      ✓ listening_ports 열린 포트     inventory
- │         │                      ✓ docker_containers 컨테이너    inventory
- │         │                      ✓ kernel_modules eBPF 확인      inventory
- │         │     Trivy            ✓ 컨테이너 이미지 목록          vuln
- └────┬────┘
-      ▼
- ┌──────────┐
- │ Discovery│     Trivy            ✓ CVE 스캔 (ID, CVSS, fix)    vuln
- │  (발견)   │     Falco            ✓ 비정상 syscall 탐지          events
- │          │     Tetragon         ✓ process_exec 추적            events
- └────┬────┘
-      ▼
- ┌──────────┐
- │ Priority │     Trivy            ✓ CVSS + fixedVersion 우선순위 vuln
- │(우선순위) │     Falco            ✓ priority 8단계 심각도        events
- │          │     Kibana           ✓ Severity 분포 대시보드        -
- └────┬────┘
-      ▼
- ┌──────────┐
- │Validation│     Falco            ✓ MITRE 시나리오 → 룰 트리거   events
- │  (검증)   │     Tetragon         ✓ MITRE 시나리오 → kprobe      events
- │          │     교차검증          ✓ 동일 행위 양쪽 탐지          events
- └────┬────┘
-      ▼
- ┌───────────┐
- │Mobilization│   Kibana Alert     △ 선택적
- │(실행 유도) │   Phase B           ✗ 비목표
- └───────────┘
+    Discovery["<b>Discovery (발견)</b><br/><br/>Trivy:<br/>✓ CVE 스캔 (ID, CVSS, fix) → vuln<br/><br/>Falco:<br/>✓ 비정상 syscall 탐지 → events<br/><br/>Tetragon:<br/>✓ process_exec 추적 → events"]
 
- ✓ = PoC 필수    △ = 선택    ✗ = 비목표
+    Priority["<b>Priority (우선순위)</b><br/><br/>Trivy:<br/>✓ CVSS + fixedVersion 우선순위 → vuln<br/><br/>Falco:<br/>✓ priority 8단계 심각도 → events<br/><br/>Kibana:<br/>✓ Severity 분포 대시보드"]
+
+    Validation["<b>Validation (검증)</b><br/><br/>Falco:<br/>✓ MITRE 시나리오 → 룰 트리거 → events<br/><br/>Tetragon:<br/>✓ MITRE 시나리오 → kprobe → events<br/><br/>교차검증:<br/>✓ 동일 행위 양쪽 탐지 → events"]
+
+    Mobilization["<b>Mobilization (실행 유도)</b><br/><br/>Kibana Alert: △ 선택적<br/>Phase B: ✗ 비목표"]
+
+    Scope --> Discovery --> Priority --> Validation --> Mobilization
+
+    style Scope fill:#4CAF50,color:#fff
+    style Discovery fill:#2196F3,color:#fff
+    style Priority fill:#FF9800,color:#fff
+    style Validation fill:#9C27B0,color:#fff
+    style Mobilization fill:#607D8B,color:#fff
 ```
+
+> ✓ = PoC 필수 / △ = 선택 / ✗ = 비목표
 
 ## 7.2 CTEM 검증 체크리스트
 
