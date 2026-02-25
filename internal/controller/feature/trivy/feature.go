@@ -182,24 +182,27 @@ func (f *trivyFeature) buildClusterRoleBinding(store *feature.DesiredStateStore)
 
 func (f *trivyFeature) buildCronJob(image string) *batchv1.CronJob {
 	// ES endpoint: use configured value or default to in-cluster ES.
+	// This default can be overridden by the reconciler with the SecurityAgent output spec.
 	esEndpoint := f.cfg.ESEndpoint
 	if esEndpoint == "" {
 		esEndpoint = "http://elasticsearch-es-http:9200"
 	}
 
-	// The script:
+	esIndex := "security-vuln"
+
+	// The script reads ES_ENDPOINT, ES_INDEX, ES_USER, ES_PASSWORD from container env vars.
 	// 1. Fetches all VulnerabilityReports across all namespaces via kubectl
 	// 2. Transforms to ES bulk format with _id = "<UID>:<CVE>:<package>" for dedup
 	// 3. Posts to ES /_bulk endpoint
-	script := fmt.Sprintf(`#!/bin/sh
+	script := `#!/bin/sh
 set -e
 
 # Ensure jq and curl are available
-command -v jq  >/dev/null 2>&1 || apk add --no-cache jq  curl >/dev/null 2>&1 || true
+command -v jq  >/dev/null 2>&1 || apk add --no-cache jq curl >/dev/null 2>&1 || true
 command -v curl >/dev/null 2>&1 || true
 
-ES_ENDPOINT="%s"
-INDEX="security-vuln"
+echo "ES_ENDPOINT=${ES_ENDPOINT}"
+echo "ES_INDEX=${ES_INDEX}"
 
 echo "Fetching VulnerabilityReports..."
 REPORTS=$(kubectl get vulnerabilityreports -A -o json 2>/dev/null || echo '{"items":[]}')
@@ -211,10 +214,11 @@ if [ "$COUNT" = "0" ]; then
   exit 0
 fi
 
-# Build ES bulk payload
+# Build ES bulk NDJSON payload directly to file (avoids shell variable limits)
 # Each VulnerabilityReport may contain multiple vulnerabilities
 # _id = "<reportUID>:<cveID>:<pkgName>" for deduplication
-BULK_BODY=$(echo "$REPORTS" | jq -r '
+# Uses -c for compact one-line-per-object output (NDJSON format)
+echo "$REPORTS" | jq -c --arg idx "$ES_INDEX" '
   .items[] |
   . as $report |
   ($report.metadata.uid) as $uid |
@@ -224,12 +228,7 @@ BULK_BODY=$(echo "$REPORTS" | jq -r '
   $report.report.vulnerabilities[]? |
   . as $vuln |
   (($uid + ":" + $vuln.vulnerabilityID + ":" + $vuln.resource) | gsub(" "; "_")) as $id |
-  {
-    index: {
-      _index: "%s",
-      _id: $id
-    }
-  } | tojson,
+  {"index": {"_index": $idx, "_id": $id}},
   {
     "@timestamp": (now | todate),
     "vulnerability": {
@@ -256,22 +255,30 @@ BULK_BODY=$(echo "$REPORTS" | jq -r '
         "tag": ($report.spec.artifact.tag // "latest")
       }
     }
-  } | tojson
-')
+  }
+' > /tmp/bulk-payload.ndjson
 
-if [ -z "$BULK_BODY" ]; then
+# Check if payload is empty
+if [ ! -s /tmp/bulk-payload.ndjson ]; then
   echo "No vulnerabilities to index"
   exit 0
 fi
 
-# Add trailing newline required by ES bulk API
-BULK_PAYLOAD=$(printf "%%s\n" "$BULK_BODY")
+# ES bulk API requires a trailing newline
+echo "" >> /tmp/bulk-payload.ndjson
+
+LINES=$(wc -l < /tmp/bulk-payload.ndjson)
+echo "Bulk payload: $LINES lines"
 
 echo "Posting to Elasticsearch..."
-HTTP_STATUS=$(curl -s -o /tmp/es-response.json -w "%%{http_code}" \
+CURL_AUTH=""
+if [ -n "${ES_USER:-}" ] && [ -n "${ES_PASSWORD:-}" ]; then
+  CURL_AUTH="-u ${ES_USER}:${ES_PASSWORD}"
+fi
+HTTP_STATUS=$(curl -sk ${CURL_AUTH} -o /tmp/es-response.json -w "%{http_code}" \
   -X POST "${ES_ENDPOINT}/_bulk" \
   -H "Content-Type: application/x-ndjson" \
-  --data-binary "$BULK_PAYLOAD")
+  --data-binary @/tmp/bulk-payload.ndjson)
 
 if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
   echo "Successfully indexed vulnerabilities (HTTP $HTTP_STATUS)"
@@ -282,7 +289,7 @@ else
   cat /tmp/es-response.json
   exit 1
 fi
-`, esEndpoint, "security-vuln")
+`
 
 	backoffLimit := int32(3)
 	successfulJobsHistory := int32(3)
@@ -324,6 +331,16 @@ fi
 										"/bin/sh",
 										"-c",
 										script,
+									},
+									Env: []corev1.EnvVar{
+										{
+											Name:  "ES_ENDPOINT",
+											Value: esEndpoint,
+										},
+										{
+											Name:  "ES_INDEX",
+											Value: esIndex,
+										},
 									},
 								},
 							},

@@ -132,25 +132,63 @@ func (r *SecurityAgentReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Step 4: Apply overrides (common nodeAgent + per-tool)
 	override.ApplyOverrides(instance.Spec.Override, store)
 
-	// Step 4.5: Inject ES_PASSWORD env var into OTel Gateway if auth is configured
-	if instance.Spec.Output.Elasticsearch != nil &&
-		instance.Spec.Output.Elasticsearch.Auth != nil &&
-		instance.Spec.Output.Elasticsearch.Auth.SecretRef != nil {
-		if gw, ok := store.Deployments["otel-gateway"]; ok {
-			secretName := instance.Spec.Output.Elasticsearch.Auth.SecretRef.Name
-			for i := range gw.Spec.Template.Spec.Containers {
-				gw.Spec.Template.Spec.Containers[i].Env = append(
-					gw.Spec.Template.Spec.Containers[i].Env,
-					corev1.EnvVar{
-						Name: "ES_PASSWORD",
-						ValueFrom: &corev1.EnvVarSource{
-							SecretKeyRef: &corev1.SecretKeySelector{
-								LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-								Key:                  "elastic",
+	// Step 4.5: Inject ES credentials into OTel Gateway and Trivy CronJob
+	if instance.Spec.Output.Elasticsearch != nil {
+		esURL := instance.Spec.Output.Elasticsearch.URL
+		secretName := ""
+		if instance.Spec.Output.Elasticsearch.Auth != nil &&
+			instance.Spec.Output.Elasticsearch.Auth.SecretRef != nil {
+			secretName = instance.Spec.Output.Elasticsearch.Auth.SecretRef.Name
+		}
+
+		// Inject ES_PASSWORD into OTel Gateway
+		if secretName != "" {
+			if gw, ok := store.Deployments["otel-gateway"]; ok {
+				for i := range gw.Spec.Template.Spec.Containers {
+					gw.Spec.Template.Spec.Containers[i].Env = append(
+						gw.Spec.Template.Spec.Containers[i].Env,
+						corev1.EnvVar{
+							Name: "ES_PASSWORD",
+							ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+									Key:                  "elastic",
+								},
 							},
 						},
-					},
-				)
+					)
+				}
+			}
+		}
+
+		// Inject ES_ENDPOINT, ES_USER, ES_PASSWORD into Trivy CronJob
+		if cj, ok := store.CronJobs["trivy-es-sync"]; ok {
+			vulnIndex := "security-vuln"
+			if instance.Spec.Output.Elasticsearch.Indices.Vulnerability != "" {
+				vulnIndex = instance.Spec.Output.Elasticsearch.Indices.Vulnerability
+			}
+			for i := range cj.Spec.JobTemplate.Spec.Template.Spec.Containers {
+				c := &cj.Spec.JobTemplate.Spec.Template.Spec.Containers[i]
+				// Override ES_ENDPOINT and ES_INDEX from output spec
+				c.Env = []corev1.EnvVar{
+					{Name: "ES_ENDPOINT", Value: esURL},
+					{Name: "ES_INDEX", Value: vulnIndex},
+				}
+				// Add auth env vars if configured
+				if secretName != "" {
+					c.Env = append(c.Env,
+						corev1.EnvVar{Name: "ES_USER", Value: "elastic"},
+						corev1.EnvVar{
+							Name: "ES_PASSWORD",
+							ValueFrom: &corev1.EnvVarSource{
+								SecretKeyRef: &corev1.SecretKeySelector{
+									LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+									Key:                  "elastic",
+								},
+							},
+						},
+					)
+				}
 			}
 		}
 	}
