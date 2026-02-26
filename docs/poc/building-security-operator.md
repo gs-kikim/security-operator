@@ -571,10 +571,10 @@ func ssaApply(ctx context.Context, c client.Client, obj client.Object) error {
 ```mermaid
 flowchart TD
     A["Feature.Contribute()"] -->|AddDaemonSet, AddConfigMap, ...| B["DesiredStateStore"]
-    B -->|ApplyAll()| C{"각 리소스 순회"}
-    C -->|Namespaced| D["setManagedLabels()<br/>setOwnerRef()"]
-    C -->|Cluster-scoped| E["setClusterScopedLabels()<br/>(OwnerRef 없음)"]
-    D --> F["SSA Patch<br/>FieldOwner: security-operator"]
+    B -->|ApplyAll| C{각 리소스 순위}
+    C -->|Namespaced| D["setManagedLabels()\nsetOwnerRef()"]
+    C -->|Cluster-scoped| E["setClusterScopedLabels()\nOwnerRef 없음"]
+    D --> F["SSA Patch\nFieldOwner: security-operator"]
     E --> F
     F -->|성공| G["다음 리소스"]
     F -->|NotFound| H["Fallback: Create"]
